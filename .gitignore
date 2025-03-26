@@ -1,0 +1,5 @@
+playground.ipynb
+__pycache__/
+
+#uv related
+uv.lock
