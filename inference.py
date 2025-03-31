@@ -31,8 +31,8 @@ class LLaMA:
         next_token = torch.gather(probs_idx, dim=-1, index=next_token)
         return next_token
 
-    # Text generation is done by top p algorith if temperature > 0
-    # Otherwise greedy algorithm is used
+    # Text generation is done by top p sampling if temperature > 0
+    # Otherwise greedy sampling is used
     def generate(
         self,
         prompts: list[str],
