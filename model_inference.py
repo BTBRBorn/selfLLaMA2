@@ -6,15 +6,15 @@ import torch.nn.functional as F
 
 @dataclass
 class ModelArgs:
-    dim: int = 128 
-    vocab_size: int = 50234 
+    dim: int = 16
+    vocab_size: int = 50304
     rms_eps: float = 1e-6
-    n_layers: int = 8
+    n_layers: int = 2
     n_heads: int = 4
     n_kv_heads: int | None = 2
 
     # hyperparameters related to kv_cache
-    max_batch_size: int = 4
+    max_batch_size: int = 8
     max_seq_len: int = 256
 
     device: str = "cuda"
@@ -36,7 +36,7 @@ def apply_rotary_pos_embeddings(x: torch.Tensor, theta_cis: torch.Tensor):
     x_rotated = x_complex * theta_cis
     # (batch_size, n_head, seq_len, head_dim//2) -> (batch_size, n_head, seq_len, head_dim//2, 2)
     x_rotated_real = torch.view_as_real(x_rotated)
-    # (batch_size, n_head, seq_len, head_dim//2, 2)
+    # (batch_size, n_head, seq_len, head_dim//2, 2) -> (batch_size, seq_len, n_head, head_dim)
     return x_rotated_real.transpose(1, 2).view(*x.shape)
 
 
@@ -75,6 +75,7 @@ class SelfAttention(nn.Module):
         self.k_cache = torch.zeros(
             size=(args.max_batch_size, args.max_seq_len, self.n_kv_heads, self.head_dim)
         ).to(args.device)
+
         self.v_cache = torch.zeros(
             size=(args.max_batch_size, args.max_seq_len, self.n_kv_heads, self.head_dim)
         ).to(args.device)
@@ -126,7 +127,7 @@ class SelfAttention(nn.Module):
 
         # (batch_size, n_heads, 1, head_dim) -> (batch_size, 1, dim)
         y = y.transpose(1, 2).view(batch_size, seq_len, self.n_heads * self.head_dim)
-
+        # (batch_size, 1, dim) -> (batch_size, 1, dim)
         return self.wo(y)
 
 
