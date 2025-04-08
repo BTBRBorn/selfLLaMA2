@@ -1,5 +1,6 @@
 import torch
-from model_inference import Transformer, ModelArgs
+from model_inference import Transformer
+from train import ModelArgs
 from pathlib import Path
 from tqdm.auto import tqdm
 # I will use tiktoken tokenizer instead of sentencepiece
@@ -19,6 +20,8 @@ class LLaMA:
     # For now code will initiate an untrained model
     def load_model(self, model_path: Path):
         self.model = Transformer(self.args).to(self.device)
+        checkpoint = torch.load(model_path, weights_only=True)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
 
     # Implementation of top p sampling
     def _sample_top_p(self, probs: torch.Tensor, p: float):
@@ -94,16 +97,16 @@ class LLaMA:
 if __name__ == "__main__":
     prompts = [
         "This is a sentence.",
-        "This is another sentence and it is a bit longer.",
+        "This is another sentence but longer.",
         "Let's see what will happen with this one.",
     ]
 
     args = ModelArgs()
     model = LLaMA(args)
-    model.load_model('')
+    model.load_model(Path('model/model_1.tar'))
 
-    sampled_text = model.generate(prompts, max_generate_len=200)
+    sampled_text = model.generate(prompts, max_generate_len=100)
     for i, text in enumerate(sampled_text):
-        print(f"Sampled text {i}: {text}")
+        print(f"{text}")
         print("-"*100)
 

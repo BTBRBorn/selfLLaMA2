@@ -39,7 +39,6 @@ class RMSNorm(nn.Module):
         return (x * self.scalar) * self.rec_rms(x)
 
 
-# Self attention with KV cache and GQA
 class SelfAttention(nn.Module):
     def __init__(self, args) -> None:
         super().__init__()
@@ -55,19 +54,8 @@ class SelfAttention(nn.Module):
         self.wv = nn.Linear(args.dim, self.head_dim * self.n_kv_heads, bias=False)
         self.wo = nn.Linear(args.dim, args.dim, bias=False)
 
-        self.k_cache = torch.zeros(
-            size=(args.max_batch_size, args.max_seq_len, self.n_kv_heads, self.head_dim)
-        ).to(args.device)
-
-        self.v_cache = torch.zeros(
-            size=(args.max_batch_size, args.max_seq_len, self.n_kv_heads, self.head_dim)
-        ).to(args.device)
-
-    def forward(
-        self, x: torch.Tensor, start_pos: int, theta_cis: torch.Tensor
-    ) -> torch.Tensor:
-        batch_size, seq_len, dim = x.size()
-        # seq_len always equals to 1
+    def forward(self, x: torch.Tensor, theta_cis: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = x.size()
         # (batch_size, seq_len, dim) -> (batch_size, seq_len, n_heads, head_dim)
         xq = self.wq(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
         # (batch_size, seq_len, dim) -> (batch_size, seq_len, n_kv_head, self.head_dim)
@@ -79,38 +67,30 @@ class SelfAttention(nn.Module):
         xk = apply_rotary_pos_embeddings(xk, theta_cis)
         xv = apply_rotary_pos_embeddings(xv, theta_cis)
 
-        # Cache the current k, v vectors
-        self.k_cache[:batch_size, start_pos : start_pos + seq_len] = xk
-        self.v_cache[:batch_size, start_pos : start_pos + seq_len] = xv
-
-        # Get all the k and v's from cache
-        # (batch_size, start_pos+1, n_kv_head, head_dim) -> (batch_size, start_pos+1, n_kv_head, head_dim)
-        xk = self.k_cache[:batch_size, : start_pos + seq_len]
-        xv = self.v_cache[:batch_size, : start_pos + seq_len]
-
         # Copy key and value heads to match query
-        # (batch_size, start_pos+1, n_kv_head, head_dim) -> (batch_size, start_pos+1, n_heads, head_dim)
+        # (batch_size, seq_len, n_kv_head, head_dim) -> (batch_size, seq_len, n_heads, head_dim)
         xk = xk.repeat_interleave(repeats=self.n_repeats, dim=-2)
         xv = xv.repeat_interleave(repeats=self.n_repeats, dim=-2)
 
         # Transpose to make n_head to be part of batch dimensions
         # (batch_size, seq_len, n_heads, head_dim) -> (batch_size, n_heads, seq_len, head_dim)
         xq = xq.transpose(1, 2)
-        # (batch_size, start_pos+1, n_heads, head_dim) -> (batch_size, n_heads, start_pos+1, head_dim)
         xk = xk.transpose(1, 2)
         xv = xv.transpose(1, 2)
 
-        # Remember seq_len = 1
-        # (batch_size, n_head, 1, head_dim) @ (batch_size, n_heads, head_dim, start_pos+1)
-        # -> (batch_size, n_heads, 1, start_pos+1)
+        # (batch_size, n_head, seq_len, head_dim) @ (batch_size, n_heads, head_dim, seq_len)
+        # -> (batch_size, n_heads, seq_len, seq_len)
         att = (xq @ xk.transpose(-1, -2)) * (self.head_dim**-0.5)
-        # (batch_size, n_heads, 1, start_pos+1) @ (batch_size, n_heads, start_pos+1, head_dim)
-        # -> (batch_size, n_heads, 1, head_dim)
+        att = torch.tril(att)
+        att.masked_fill_(att == 0.0, value=float("-inf"))
+        att = F.softmax(att, dim=-1)
+        # (batch_size, n_heads, seq_len, seq_len) @ (batch_size, n_heads, seq_len, head_dim)
+        # -> (batch_size, n_heads, seq_len, head_dim)
         y = F.softmax(att @ xv, dim=-1)
 
-        # (batch_size, n_heads, 1, head_dim) -> (batch_size, 1, dim)
-        y = y.transpose(1, 2).view(batch_size, seq_len, self.n_heads * self.head_dim)
-        # (batch_size, 1, dim) -> (batch_size, 1, dim)
+        # (batch_size, n_heads, seq_len, head_dim) -> (batch_size, seq_len, dim)
+        y = y.transpose(1, 2).reshape(batch_size, seq_len, -1)
+        # (batch_size, seq_len, dim) -> (batch_size, seq_len, dim)
         return self.wo(y)
 
 
@@ -136,10 +116,8 @@ class Block(nn.Module):
         self.rms_ffd = RMSNorm(dim=args.dim, eps=args.rms_eps)
         self.ffd = FeedForward(args)
 
-    def forward(
-        self, x: torch.Tensor, start_pos: int, theta_cis: float
-    ) -> torch.Tensor:
-        x = x + self.attention(self.rms_attention(x), start_pos, theta_cis)
+    def forward(self, x: torch.Tensor, theta_cis: float) -> torch.Tensor:
+        x = x + self.attention(self.rms_attention(x), theta_cis)
         x = x + self.ffd(self.rms_ffd(x))
         return x
 
@@ -157,15 +135,12 @@ class Transformer(nn.Module):
         self.ln_rms = RMSNorm(args.dim, eps=args.rms_eps)
         self.ln_head = nn.Linear(args.dim, args.vocab_size, bias=False)
 
-    def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # (batch_size, seq_len) -> (batch_size, seq_len, dim)
         batch_size, seq_len = x.shape
-        assert seq_len == 1, (
-            f"Inference code is using kv cache therefore sequence length has to be 1 not {seq_len}"
-        )
         x = self.tok_emb(x)
-        theta_cis = self.theta_cis[start_pos : start_pos + seq_len]
+        theta_cis = self.theta_cis[:seq_len]
         for block in self.blocks:
-            x = block(x, start_pos, theta_cis)
+            x = block(x, theta_cis)
         x = self.ln_rms(x)
         return self.ln_head(x)

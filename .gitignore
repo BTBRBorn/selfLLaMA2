@@ -1,5 +1,6 @@
 playground.ipynb
 __pycache__/
+model/
 
 #uv related
 uv.lock
