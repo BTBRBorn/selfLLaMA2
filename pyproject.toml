@@ -72,4 +72,6 @@ dependencies = [
     "wcwidth==0.2.13",
     "requests>=2.32.3",
     "tiktoken>=0.9.0",
+    "einops>=0.8.1",
+    "jaxtyping>=0.3.1",
 ]

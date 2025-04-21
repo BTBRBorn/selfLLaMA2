@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+from einops import rearrange, repeat, einsum
+from jaxtyping import Float
 
 
 def pre_compute_cis(head_dim: int, seq_len: int, theta_base: float = 1e4):
@@ -37,6 +39,82 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (x * self.scalar) * self.rec_rms(x)
+
+# I added this one just to try out Einops library
+class SelfAttentionEinops(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.n_heads = args.n_heads
+        self.head_dim = args.dim // args.n_heads
+        self.n_kv_heads = (
+            args.n_kv_heads if args.n_kv_heads is not None else args.n_heads
+        )
+        self.n_repeats = args.n_heads // self.n_kv_heads
+
+        self.wq = nn.Linear(args.dim, args.dim, bias=False)
+        self.wk = nn.Linear(args.dim, self.head_dim * self.n_kv_heads, bias=False)
+        self.wv = nn.Linear(args.dim, self.head_dim * self.n_kv_heads, bias=False)
+        self.wo = nn.Linear(args.dim, args.dim, bias=False)
+
+    def forward(
+        self, x: Float[torch.Tensor, "batch_size seq_len dim"], theta_cis: torch.Tensor
+    ) -> torch.Tensor:
+        xq = rearrange(
+            self.wq(x),
+            "batch_size seq_len (n_head head_dim) -> batch_size n_head seq_len head_dim",
+            head_dim=self.head_dim,
+        )
+        xk = rearrange(
+            self.wk(x),
+            "batch_size seq_len (n_kv_head head_dim) -> batch_size seq_len n_kv_head head_dim",
+            head_dim=self.head_dim,
+        )
+        xv = rearrange(
+            self.wv(x),
+            "batch_size seq_len (n_kv_head head_dim) -> batch_size seq_len n_kv_head head_dim",
+            head_dim=self.head_dim,
+        )
+
+        xk = apply_rotary_pos_embeddings(xk, theta_cis)
+        xv = apply_rotary_pos_embeddings(xv, theta_cis)
+
+        xk = repeat(
+            xk,
+            "batch_size seq_len n_kv_head head_dim -> batch_size (n_kv_head num_repeat) seq_len head_dim",
+            num_repeat=self.n_repeats,
+        )
+
+        xv = repeat(
+            xv,
+            "batch_size seq_len n_kv_head head_dim -> batch_size (n_kv_head num_repeat) seq_len head_dim",
+            num_repeat=self.n_repeats,
+        )
+
+        att = einsum(
+            xq,
+            xk,
+            "batch_size n_head seq_len1 head_dim, batch_size n_head seq_len2 head_dim "
+            "-> batch_size n_head seq_len1 seq_len2",
+        ) * (self.head_dim**-0.5)
+
+        # Apply the mask
+        att = torch.tril(att)
+        att.masked_fill_(att == 0.0, value=float("-inf"))
+        att = F.softmax(att, dim=-1)
+
+        y = einsum(
+            att,
+            xv,
+            "batch_size n_head seq_len seq_len2, batch_size n_head seq_len2 head_dim "
+            "-> batch_size n_head seq_len head_dim",
+        )
+
+        out = rearrange(
+            y,
+            "batch_size n_head seq_len head_dim -> batch_size seq_len (n_head head_dim)",
+        )
+
+        return self.wo(out)
 
 
 class SelfAttention(nn.Module):
@@ -86,7 +164,7 @@ class SelfAttention(nn.Module):
         att = F.softmax(att, dim=-1)
         # (batch_size, n_heads, seq_len, seq_len) @ (batch_size, n_heads, seq_len, head_dim)
         # -> (batch_size, n_heads, seq_len, head_dim)
-        y = F.softmax(att @ xv, dim=-1)
+        y = att @ xv
 
         # (batch_size, n_heads, seq_len, head_dim) -> (batch_size, seq_len, dim)
         y = y.transpose(1, 2).reshape(batch_size, seq_len, -1)
@@ -112,7 +190,7 @@ class Block(nn.Module):
     def __init__(self, args) -> None:
         super().__init__()
         self.rms_attention = RMSNorm(dim=args.dim, eps=args.rms_eps)
-        self.attention = SelfAttention(args)
+        self.attention = SelfAttentionEinops(args)
         self.rms_ffd = RMSNorm(dim=args.dim, eps=args.rms_eps)
         self.ffd = FeedForward(args)
 

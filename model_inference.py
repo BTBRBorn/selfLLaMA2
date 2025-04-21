@@ -104,9 +104,10 @@ class SelfAttention(nn.Module):
         # (batch_size, n_head, 1, head_dim) @ (batch_size, n_heads, head_dim, start_pos+1)
         # -> (batch_size, n_heads, 1, start_pos+1)
         att = (xq @ xk.transpose(-1, -2)) * (self.head_dim**-0.5)
+        att = F.softmax(att, dim=-1)
         # (batch_size, n_heads, 1, start_pos+1) @ (batch_size, n_heads, start_pos+1, head_dim)
         # -> (batch_size, n_heads, 1, head_dim)
-        y = F.softmax(att @ xv, dim=-1)
+        y = att @ xv
 
         # (batch_size, n_heads, 1, head_dim) -> (batch_size, 1, dim)
         y = y.transpose(1, 2).view(batch_size, seq_len, self.n_heads * self.head_dim)

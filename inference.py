@@ -16,8 +16,8 @@ class LLaMA:
         self.device = args.device
         self.max_seq_len = args.max_seq_len
         self.max_batch_size = args.max_batch_size
+        self.model = None
 
-    # For now code will initiate an untrained model
     def load_model(self, model_path: Path):
         self.model = Transformer(self.args).to(self.device)
         checkpoint = torch.load(model_path, weights_only=True)
@@ -41,7 +41,7 @@ class LLaMA:
         prompts: list[str],
         max_generate_len: int = 32,
         temperature: float = 0.6,
-        top_p: float = 0.9,
+        top_p: float = 0.5,
     ):
         prompts_tokens = [self.tokenizer.encode_ordinary(prompt) for prompt in prompts]
         batch_size = len(prompts_tokens)

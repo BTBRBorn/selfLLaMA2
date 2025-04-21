@@ -8,6 +8,7 @@ import tiktoken
 from tqdm.auto import tqdm
 from argparse import ArgumentParser
 
+torch.set_float32_matmul_precision('high')
 
 @dataclass
 class ModelArgs:
@@ -52,6 +53,7 @@ class CustomDataset(Dataset):
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument('--num_epochs', type=int, default=12)
+    parser.add_argument("--compile_model", type=int, choices={0, 1}, default=0)
     train_args = parser.parse_args()
 
     args = ModelArgs()
@@ -68,6 +70,11 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
     model = Transformer(args).to(args.device)
+    if train_args.compile_model:
+        compiled_model = torch.compile(model)
+        models = (compiled_model, model)
+    else:
+        models = (model, None)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, betas=(0.9, 0.95))
 
@@ -78,7 +85,8 @@ if __name__ == "__main__":
             optimizer.zero_grad()
             x, y = x.to(args.device), y.to(args.device)
             batch_size, seq_len = x.size()
-            logits = model(x)
+            # models[0] could be model or compiled_model
+            logits = models[0](x)
             # (batch_size, seq_len) -> (batch_size, seq_len, vocab_size)
             loss = F.cross_entropy(logits.view(batch_size * seq_len, -1), y.view(-1))
             loss_epoch += loss.item()
